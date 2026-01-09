@@ -37,11 +37,6 @@ logger = logging.getLogger("main")
 # =========================================================
 
 class DiscordGateway:
-    """
-    Thin wrapper around discord.Client.
-    Text-only users can ignore voice-related methods.
-    """
-
     def __init__(self, token: str):
         self.token = token
         self.client: discord.Client | None = None
@@ -49,71 +44,71 @@ class DiscordGateway:
         self.ready = False
 
     async def connect(self) -> bool:
-        try:
-            self.client = discord.Client()
+        self.client = discord.Client()
 
-            @self.client.event
-            async def on_connect():
-                self.user_id = self.client.user.id
-                self.ready = True
-                logger.info("Connected as user ID %s", self.user_id)
+        @self.client.event
+        async def on_connect():
+            self.user_id = self.client.user.id
+            self.ready = True
+            logger.info("Connected as user ID %s", self.user_id)
 
-            asyncio.create_task(self.client.start(self.token))
+        asyncio.create_task(self.client.start(self.token))
 
-            # Wait up to 30 seconds for ready
-            for _ in range(60):
-                if self.ready:
-                    return True
-                await asyncio.sleep(0.5)
+        for _ in range(60):  # ~30s
+            if self.ready:
+                return True
+            await asyncio.sleep(0.5)
 
-            logger.error("Gateway connection timeout")
-            return False
+        logger.error("Discord gateway connection timeout")
+        return False
 
-        except Exception as e:
-            logger.error("Gateway connection failed: %s", e)
-            return False
-
-    # ---------- Text helpers ----------
+    # ---------- shared helpers ----------
 
     async def send_message(self, channel_id: int, content: str):
-        try:
-            channel = self.client.get_channel(channel_id)
-            if channel:
-                msg = await channel.send(content)
-                return msg.id
-        except Exception as e:
-            logger.error("Send message failed: %s", e)
+        channel = self.client.get_channel(channel_id)
+        if channel:
+            msg = await channel.send(content)
+            return msg.id
         return None
 
     async def delete_message(self, channel_id: int, message_id: int):
         try:
             channel = self.client.get_channel(channel_id)
-            if channel:
-                msg = await channel.fetch_message(message_id)
-                await msg.delete()
+            if not channel:
+                return
+            msg = await channel.fetch_message(message_id)
+            await msg.delete()
+            logger.info(
+                "Message %s deleted from channel %s",
+                message_id,
+                channel_id,
+            )
         except Exception as e:
-            logger.error("Delete message failed: %s", e)
-
-    # ---------- Voice helpers (safe to ignore if unused) ----------
+            logger.error(
+                "Failed to delete message %s from channel %s: %s",
+                message_id,
+                channel_id,
+                e,
+            )
 
     async def join_vc(self, vc_id: int) -> bool:
         try:
-            await self.leave_vc()
-            vc = self.client.get_channel(vc_id)
-            if vc and isinstance(vc, discord.VoiceChannel):
-                await vc.connect()
+            for vc in list(self.client.voice_clients):
+                await vc.disconnect(force=True)
+
+            channel = self.client.get_channel(vc_id)
+            if isinstance(channel, discord.VoiceChannel):
+                await channel.connect()
                 logger.info("Joined VC %s", vc_id)
                 return True
         except Exception as e:
             logger.warning("Join VC failed: %s", e)
         return False
 
-    async def leave_vc(self):
-        try:
-            for vc in list(self.client.voice_clients):
-                await vc.disconnect(force=True)
-        except Exception:
-            pass
+    def on_voice_state_update(self, callback):
+        @self.client.event
+        async def on_voice_state_update(member, before, after):
+            await callback(member, before, after)
 
     async def close(self):
         if self.client:
@@ -125,12 +120,6 @@ class DiscordGateway:
 # =========================================================
 
 class LevelingAutomation:
-    """
-    Central controller.
-    Text and Voice modules are intentionally separated
-    so either can be disabled cleanly.
-    """
-
     def __init__(self):
         self.gateway: DiscordGateway | None = None
         self.text_module: TextModule | None = None
@@ -144,7 +133,7 @@ class LevelingAutomation:
             logger.error("DISCORD_TOKEN missing")
             return False
 
-        # Validate token early
+        # Token validation (global safety)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.get(
@@ -160,7 +149,7 @@ class LevelingAutomation:
 
         self.gateway = DiscordGateway(token.strip())
 
-        # Shared config passed to modules
+        # Shared config only (no logic)
         config = {
             "TARGET_CHANNELS": os.getenv("TARGET_CHANNELS", ""),
             "TARGET_VCS": os.getenv("TARGET_VCS", ""),
@@ -168,9 +157,9 @@ class LevelingAutomation:
             "TEXT_JITTER_SEC": os.getenv("TEXT_JITTER_SEC", "0"),
             "TEXT_DELETE_ENABLED": os.getenv("TEXT_DELETE_ENABLED", "true"),
             "TEXT_AUTO_DELETE_SEC": os.getenv("TEXT_AUTO_DELETE_SEC", "3"),
+            "VOICE_REJOIN_COOLDOWN_SEC": os.getenv("VOICE_REJOIN_COOLDOWN_SEC", "300"),
         }
 
-        # ---- Module wiring (easy to comment out) ----
         self.text_module = TextModule(self.gateway, config)
         self.voice_module = VoiceModule(self.gateway, config)
 
@@ -184,26 +173,17 @@ class LevelingAutomation:
         if not await self.gateway.connect():
             return
 
-        tasks: list[asyncio.Task] = []
+        tasks = []
 
-        # ================= TEXT MODE =================
         if mode in ("text", "both"):
             logger.info("Text module enabled")
             tasks.append(asyncio.create_task(self.text_module.run()))
 
-        # ================= VOICE MODE =================
         if mode in ("voice", "both"):
             logger.info("Voice module enabled")
             tasks.append(asyncio.create_task(self.voice_module.run()))
 
-        # If someone wants TEXT-ONLY:
-        #   → comment the VOICE block above
-        #   → no voice code will execute
-
-        try:
-            await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
-            logger.info("Tasks cancelled")
+        await asyncio.gather(*tasks)
 
     async def shutdown(self):
         logger.info("Shutting down")
@@ -225,19 +205,16 @@ class LevelingAutomation:
 # =========================================================
 
 async def main():
-    automation = LevelingAutomation()
+    app = LevelingAutomation()
 
-    if not await automation.initialize():
+    if not await app.initialize():
         return
 
     loop = asyncio.get_running_loop()
-
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig, lambda: asyncio.create_task(automation.shutdown())
-        )
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(app.shutdown()))
 
-    await automation.run()
+    await app.run()
 
 
 if __name__ == "__main__":

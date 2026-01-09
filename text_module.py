@@ -34,8 +34,8 @@ class TextModule:
             async with aiofiles.open(greeting_file, "r", encoding="utf-16") as f:
                 content = await f.read()
                 self.greetings = [
-                    line.strip() 
-                    for line in content.split("\n") 
+                    line.strip()
+                    for line in content.split("\n")
                     if line.strip() and len(line.strip()) >= 25
                 ]
                 logger.info("Loaded %d greetings", len(self.greetings))
@@ -47,7 +47,7 @@ class TextModule:
         """Main text module loop."""
         self.running = True
         logger.info("Text Module started")
-        
+
         # Load greetings on startup
         await self.load_greetings()
 
@@ -59,26 +59,44 @@ class TextModule:
         base_interval = float(self.config.get("TEXT_INTERVAL_SEC", 100))
         jitter = float(self.config.get("TEXT_JITTER_SEC", 0))
         delete_enabled = self.config.get("TEXT_DELETE_ENABLED", "true").lower() == "true"
-        delete_sec = int(self.config.get("TEXT_AUTO_DELETE_SEC", 3))
+        delete_sec = float(self.config.get("TEXT_AUTO_DELETE_SEC", 3))
 
         while self.running:
             try:
-                # Random channel each cycle
+                # Pick random channel & message
                 channel_id = random.choice(channels)
                 greeting = random.choice(self.greetings)
 
                 # Send message
                 msg_id = await self.gateway.send_message(channel_id, greeting)
-                
+
                 if msg_id:
-                    logger.info("Message sent: %s", greeting[:40])
+                    logger.info(
+                        "Message sent | channel=%s | msg_id=%s | content=%.40s",
+                        channel_id,
+                        msg_id,
+                        greeting,
+                    )
 
                     # Auto-delete if enabled
                     if delete_enabled and delete_sec > 0:
+                        logger.info(
+                            "Auto-delete scheduled | channel=%s | msg_id=%s | delay=%.2f sec",
+                            channel_id,
+                            msg_id,
+                            delete_sec,
+                        )
+
                         await asyncio.sleep(delete_sec)
                         await self.gateway.delete_message(channel_id, msg_id)
 
-                # Wait for next interval with jitter
+                        logger.info(
+                            "Message auto-deleted | channel=%s | msg_id=%s",
+                            channel_id,
+                            msg_id,
+                        )
+
+                # Wait for next interval
                 wait_time = get_jittered_interval(base_interval, jitter)
                 logger.info("Next message in %.1f seconds", wait_time)
                 await asyncio.sleep(wait_time)
