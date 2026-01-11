@@ -3,13 +3,8 @@ import logging
 import os
 import signal
 
-import httpx
 import discord
 from dotenv import load_dotenv
-
-from text_module import TextModule
-from voice_module import VoiceModule
-
 
 # =========================================================
 # Logging
@@ -26,11 +21,9 @@ def setup_logging(level_str: str = "INFO"):
         ],
     )
 
-
-load_dotenv()
+load_dotenv(dotenv_path=".env", override=True)
 setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("main")
-
 
 # =========================================================
 # Discord Gateway
@@ -54,7 +47,7 @@ class DiscordGateway:
 
         asyncio.create_task(self.client.start(self.token))
 
-        for _ in range(60):  # ~30s
+        for _ in range(60):  # ~30 seconds
             if self.ready:
                 return True
             await asyncio.sleep(0.5)
@@ -78,11 +71,7 @@ class DiscordGateway:
                 return
             msg = await channel.fetch_message(message_id)
             await msg.delete()
-            logger.info(
-                "Message %s deleted from channel %s",
-                message_id,
-                channel_id,
-            )
+            logger.info("Message %s deleted from channel %s", message_id, channel_id)
         except Exception as e:
             logger.error(
                 "Failed to delete message %s from channel %s: %s",
@@ -114,54 +103,41 @@ class DiscordGateway:
         if self.client:
             await self.client.close()
 
-
 # =========================================================
 # Automation Controller
 # =========================================================
 
 class LevelingAutomation:
     def __init__(self):
-        self.gateway: DiscordGateway | None = None
-        self.text_module: TextModule | None = None
-        self.voice_module: VoiceModule | None = None
+        self.gateway = None
+        self.text_module = None
+        self.voice_module = None
+        self.config = {}
 
     async def initialize(self) -> bool:
         logger.info("Initializing automation")
 
         token = os.getenv("DISCORD_TOKEN")
-        if not token:
-            logger.error("DISCORD_TOKEN missing")
-            return False
-
-        # Token validation (global safety)
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(
-                    "https://discord.com/api/v10/users/@me",
-                    headers={"Authorization": token.strip()},
-                )
-                if r.status_code != 200:
-                    logger.error("Invalid Discord token")
-                    return False
-        except Exception as e:
-            logger.error("Token validation failed: %s", e)
+        if not token or not token.strip():
+            logger.error("DISCORD_TOKEN missing or empty")
             return False
 
         self.gateway = DiscordGateway(token.strip())
 
-        # Shared config only (no logic)
-        config = {
+        # Shared config ONLY (no logic here)
+        self.config = {
             "TARGET_CHANNELS": os.getenv("TARGET_CHANNELS", ""),
             "TARGET_VCS": os.getenv("TARGET_VCS", ""),
             "TEXT_INTERVAL_SEC": os.getenv("TEXT_INTERVAL_SEC", "100"),
             "TEXT_JITTER_SEC": os.getenv("TEXT_JITTER_SEC", "0"),
             "TEXT_DELETE_ENABLED": os.getenv("TEXT_DELETE_ENABLED", "true"),
             "TEXT_AUTO_DELETE_SEC": os.getenv("TEXT_AUTO_DELETE_SEC", "3"),
-            "VOICE_REJOIN_COOLDOWN_SEC": os.getenv("VOICE_REJOIN_COOLDOWN_SEC", "300"),
+            "VOICE_BASE_STAY_SEC": os.getenv("VOICE_BASE_STAY_SEC", "3600"),
+            "VOICE_JITTER_SEC": os.getenv("VOICE_JITTER_SEC", "3600"),
+            "VOICE_COOLDOWN_SEC": os.getenv("VOICE_COOLDOWN_SEC", "900"),
+            "VOICE_BUSY_RETRY_SEC": os.getenv("VOICE_BUSY_RETRY_SEC", "60"),
+            "TIMEZONE": os.getenv("TIMEZONE", "Asia/Kolkata"),
         }
-
-        self.text_module = TextModule(self.gateway, config)
-        self.voice_module = VoiceModule(self.gateway, config)
 
         logger.info("Initialization complete")
         return True
@@ -175,13 +151,29 @@ class LevelingAutomation:
 
         tasks = []
 
+        # -------- TEXT MODE --------
         if mode in ("text", "both"):
-            logger.info("Text module enabled")
-            tasks.append(asyncio.create_task(self.text_module.run()))
+            try:
+                from text_module import TextModule
+                logger.info("Text module enabled")
+                self.text_module = TextModule(self.gateway, self.config)
+                tasks.append(asyncio.create_task(self.text_module.run()))
+            except ImportError as e:
+                logger.error("Text module not available: %s", e)
 
+        # -------- VOICE MODE --------
         if mode in ("voice", "both"):
-            logger.info("Voice module enabled")
-            tasks.append(asyncio.create_task(self.voice_module.run()))
+            try:
+                from voice_module import VoiceModule
+                logger.info("Voice module enabled")
+                self.voice_module = VoiceModule(self.gateway, self.config)
+                tasks.append(asyncio.create_task(self.voice_module.run()))
+            except ImportError as e:
+                logger.error("Voice module not available: %s", e)
+
+        if not tasks:
+            logger.error("No modules enabled — exiting")
+            return
 
         await asyncio.gather(*tasks)
 
@@ -199,7 +191,6 @@ class LevelingAutomation:
 
         logger.info("Shutdown complete")
 
-
 # =========================================================
 # Entrypoint
 # =========================================================
@@ -215,7 +206,6 @@ async def main():
         loop.add_signal_handler(sig, lambda: asyncio.create_task(app.shutdown()))
 
     await app.run()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
